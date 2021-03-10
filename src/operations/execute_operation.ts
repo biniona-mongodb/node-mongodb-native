@@ -56,52 +56,53 @@ export function executeOperation<
 export function executeOperation<
   T extends AbstractOperation<TResult>,
   TResult = ResultTypeFromOperation<T>
->(topology: Topology, operation: T, callback?: Callback<TResult>): Promise<TResult> | void {
+>(topology: Topology, operation: T, cb?: Callback<TResult>): Promise<TResult> | void {
   if (!(operation instanceof AbstractOperation)) {
     throw new TypeError('This method requires a valid operation instance');
   }
 
-  if (topology.shouldCheckForSessionSupport()) {
-    return maybePromise(callback, cb => {
+  return maybePromise(cb, callback => {
+    if (topology.shouldCheckForSessionSupport()) {
       topology.selectServer(ReadPreference.primaryPreferred, err => {
         if (err) {
-          cb(err);
+          callback(err);
           return;
         }
 
-        executeOperation<T, TResult>(topology, operation, cb);
+        executeOperation<T, TResult>(topology, operation, callback);
       });
-    });
-  }
-
-  // The driver sessions spec mandates that we implicitly create sessions for operations
-  // that are not explicitly provided with a session.
-  let session = operation.session;
-  let owner: symbol;
-  if (topology.hasSessionSupport()) {
-    if (session == null) {
-      owner = Symbol();
-      session = topology.startSession({ owner, explicit: false });
-    } else if (operation.session.hasEnded) {
-      throw new MongoError('Use of expired sessions is not permitted');
     }
-  }
+    // The driver sessions spec mandates that we implicitly create sessions for operations
+    // that are not explicitly provided with a session.
+    let session = operation.session;
+    let owner: symbol | undefined;
+    if (topology.hasSessionSupport()) {
+      if (session == null) {
+        owner = Symbol();
+        session = topology.startSession({ owner, explicit: false });
+      } else if (operation.session.hasEnded) {
+        callback(new MongoError('Use of expired sessions is not permitted'));
+      }
+    } else if (operation.session) {
+      // If the user passed an explicit session and we are still, after server selection,
+      // trying to run against a topology that doesn't support sessions we error out.
+      return callback(new MongoError('Current topology does not support sessions'));
+    }
 
-  return maybePromise(callback, cb => {
     try {
       executeWithServerSelection(topology, session, operation, (err, result) => {
         if (session && session.owner && session.owner === owner) {
-          return session.endSession(err2 => cb(err2 || err, result));
+          return session.endSession(err2 => callback(err2 || err, result));
         }
 
-        cb(err, result);
+        callback(err, result);
       });
-    } catch (e) {
+    } catch (error) {
       if (session && session.owner && session.owner === owner) {
         session.endSession();
       }
 
-      throw e;
+      callback(error);
     }
   });
 }
